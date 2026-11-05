@@ -121,6 +121,9 @@ Item {
     return artist ? artist + " — " + title : title
   }
 
+  readonly property bool vertical: (bar && bar.vertical) || (hostWidget && hostWidget.vertical)
+  readonly property int barSize: bar ? bar.barSize : (hostWidget ? hostWidget.barSize : Style.bar.sizeHorizontal)
+
   function navigating() {
     navSpinner = true
     navSpinnerTimer.restart()
@@ -146,11 +149,12 @@ Item {
     return true
   }
 
-  implicitWidth: controls.width + Style.space(12)
-  implicitHeight: bar ? bar.barSize : Style.bar.sizeHorizontal
+  implicitWidth: vertical ? barSize : (controls.width + Style.space(12))
+  implicitHeight: bar ? bar.barSize : (vertical ? Style.bar.sizeVertical : Style.bar.sizeHorizontal)
 
   Row {
     id: controls
+    visible: !root.vertical
     // Keep real buttons above the shared information hit area.
     z: 1
     anchors.centerIn: parent
@@ -760,7 +764,7 @@ Item {
     y: 0
     width: Math.max(0, endX - startX) + Style.space(8)
     height: root.height
-    visible: !root.signedOut && !root.errorState
+    visible: !root.vertical && !root.signedOut && !root.errorState
       && (cover.visible || popupButton.visible || labelSlot.visible || likeButton.visible
         || showTimeText.visible || lyricsSlot.visible)
       && informationHover.hovered
@@ -917,6 +921,112 @@ Item {
     likeTimeout.stop()
     likeError = true
     likeErrorTimer.restart()
+ Item {
+    id: verticalWidget
+    visible: root.vertical
+    anchors.fill: parent
+
+    BorderSurface {
+      id: verticalCover
+      visible: root.showCover && Boolean(root.logic && root.logic.data && root.logic.data.artUrl)
+      width: Style.space(22); height: Style.space(22)
+      anchors.centerIn: parent
+      radius: root.coverShape === "circle" ? width / 2
+        : (root.coverShape === "square" ? 0 : Style.space(4))
+      color: Style.normalFillFor(root.foreground, Color.accent)
+      borderSpec: Border.none()
+
+      Rectangle {
+        id: verticalCoverMask
+        anchors.fill: parent
+        visible: false
+        layer.enabled: true
+        radius: verticalCover.radius
+        color: "white"
+      }
+
+      Image {
+        anchors.fill: parent
+        source: root.logic && root.logic.data.artUrl ? root.logic.data.artUrl : ""
+        fillMode: Image.PreserveAspectCrop
+        asynchronous: true
+        visible: source !== ""
+        layer.enabled: true
+        layer.smooth: true
+        layer.effect: MultiEffect {
+          maskEnabled: true
+          maskSource: verticalCoverMask
+          maskThresholdMin: .3
+          maskSpreadAtMin: .3
+        }
+      }
+    }
+
+    Text {
+      id: verticalIcon
+      textFormat: Text.PlainText
+      visible: !verticalCover.visible
+      anchors.centerIn: parent
+      text: "󰝚"
+      color: root.playing ? Color.accent : root.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.icon
+    }
+
+    Rectangle {
+      visible: root.playing && verticalCover.visible
+      width: Style.space(6); height: Style.space(6); radius: width / 2
+      color: Color.accent
+      anchors.right: verticalCover.right; anchors.bottom: verticalCover.bottom
+      anchors.rightMargin: -Style.space(1); anchors.bottomMargin: -Style.space(1)
+      border.width: 1
+      border.color: Color.background
+    }
+
+    Canvas {
+      anchors.centerIn: parent
+      visible: root.loading
+      width: Style.space(18); height: width
+      antialiasing: true
+      rotation: root.loaderAngle
+      onPaint: {
+        var context = getContext("2d")
+        context.clearRect(0, 0, width, height)
+        context.beginPath()
+        context.arc(width / 2, height / 2, width / 2 - Style.space(1.5),
+          -Math.PI / 2, Math.PI * .85, false)
+        context.lineWidth = Style.space(2)
+        context.lineCap = "round"
+        context.strokeStyle = Color.accent
+        context.stroke()
+      }
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      anchors.top: parent.top; anchors.right: parent.right
+      anchors.topMargin: Style.space(2); anchors.rightMargin: Style.space(2)
+      visible: root.hasError && !root.loading
+      text: "󰀪"; color: Color.urgent
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+      cursorShape: Qt.PointingHandCursor
+      onClicked: function(mouse) {
+        if (mouse.button === Qt.MiddleButton) {
+          if (root.logic) root.logic.action("pause")
+        } else {
+          if (root.logic) root.logic.toggle()
+        }
+      }
+      onEntered: if (root.bar) root.bar.showTooltip(parent, root.label)
+      onExited: if (root.bar) root.bar.hideTooltip(parent)
+    }
   }
 
   Timer {
@@ -928,9 +1038,8 @@ Item {
 
   Rectangle {
     id: progressBarContainer
-    visible: root.hasTrack && root.showProgress
-    x: controls.x + (cover.visible ? cover.x : labelSlot.x)
-    anchors.bottom: parent.bottom
+    visible: !root.vertical && root.hasTrack && root.showProgress
+    anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
     width: {
       var startX = cover.visible ? cover.x : labelSlot.x
       var endX = separatorItem.visible
@@ -942,7 +1051,6 @@ Item {
     height: Style.space(2)
     color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, .15)
     opacity: root.dimmed ? .5 : 1
-
     Rectangle {
       width: parent.width * (root.logic
         ? Math.min(1, root.displayPosition / Math.max(1, Number(root.logic.snapshot.duration || 1)))

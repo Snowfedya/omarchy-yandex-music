@@ -1000,6 +1000,7 @@ class Player:
         return saved["access_token"]
 
     @staticmethod
+    @staticmethod
     def _is_transient_restore_error(exc: Any) -> bool:
         """Detect temporary network/DNS failures, typical right after boot or resume."""
         markers = (
@@ -1020,9 +1021,48 @@ class Player:
             current = current.__cause__ or current.__context__
         return False
 
+    @staticmethod
+    def _is_network_error(exc: Any) -> bool:
+        if isinstance(exc, (requests.exceptions.RequestException, OSError)):
+            if isinstance(exc, requests.exceptions.HTTPError):
+                resp = getattr(exc, "response", None)
+                if resp is not None and 400 <= resp.status_code < 500:
+                    return False
+            return True
+        msg = str(exc).lower()
+        return "nameresolutionerror" in msg or "temporary failure" in msg or "network is unreachable" in msg
+
+    def restore(self) -> None:
+        with self.lock:
+            if self.state["connecting"] or self.state["authenticated"]:
+                return
+            self.state.update(connecting=True, error="")
+        threading.Thread(target=self._restore, daemon=True).start()
+
     def _restore(self) -> None:
         if not TOKEN_FILE.exists(): return
-        self._restore_session_with_retry()
+        delays = (2, 3, 5, 10, 15, 30)
+        for attempt in range(len(delays) + 1):
+            if not TOKEN_FILE.exists(): return
+            with self.lock:
+                if self.client is not None: return
+            try:
+                saved = self._load_token()
+                expires = int(saved.get("expires_in") or 0)
+                token = saved["access_token"]
+                if expires and time.time() >= int(saved.get("saved_at") or 0) + expires - 86400:
+                    token = self._refresh_token(saved)
+                self._connect(token)
+                self._restore_queue()
+                return
+            except Exception as exc:
+                if attempt < len(delays) and self._is_network_error(exc):
+                    with self.lock:
+                        self.state.update(connecting=True, error="")
+                    time.sleep(delays[attempt])
+                    continue
+                self._set_error(f"Не удалось восстановить сессию: {exc}")
+                return
 
     def _restore_session_with_retry(self) -> None:
         """Restore the saved session, retrying while the network is not up yet."""
@@ -5143,6 +5183,9 @@ class Player:
         if cmd == "status": return self.status()
         if cmd == "details": return self.status(include_queue=True)
         if cmd == "network": return self.network_status(start=True)
+        if cmd == "restore":
+            self.restore()
+            return self.status()
         if cmd == "lyrics": return self.lyrics()
         if cmd == "lyrics_refresh": return self.lyrics(force=True)
         if cmd == "track_info": return self.track_info()

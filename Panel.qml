@@ -10,7 +10,8 @@ import "ActionIntents.js" as ActionIntents
 Panel {
   id: root
   moduleName: "vornashev.yandex-music"
-  manageIpc: false
+  ipcTarget: "vornashev.yandex-music"
+  manageIpc: true
 
   property var anchorItem: null
   property var hostWidget: null
@@ -747,14 +748,8 @@ Panel {
   function retryLastOperation() {
     dismissedError = ""
     lastError = ""
-    // Session restore errors leave authenticated=false with no last action.
-    // A plain status refresh would return the same sticky error, so trigger
-    // an explicit backend reconnect instead.
-    if (!authenticated && data.authPending !== true) {
-      intent("reconnect")
-      return
-    }
-    if (errorSource === "status" || lastActionCommand === "") refresh()
+    if (!data.authenticated && !data.connecting && !data.authPending) action("restore")
+    else if (errorSource === "status" || lastActionCommand === "") refresh()
     else action(lastActionCommand, lastActionArgument)
   }
   function queueVolume(value) {
@@ -1004,6 +999,7 @@ Panel {
   onLyricsCurrentIndexChanged: if (lyricsAutoScroll) lyricsScrollTimer.restart()
 
   onOpenedChanged: {
+    console.log("[YandexMusic] Panel.onOpenedChanged fired! opened:", opened, "anchorItem:", anchorItem, "bar:", bar)
     if (opened) {
       positionClockMs = Date.now()
       refresh()
@@ -1618,7 +1614,1940 @@ Panel {
               width: parent.width
               text: root.lastError; wrapMode: Text.WordWrap
               color: root.foreground; font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+              font.pixelSize: Style.font.title; font.bold: true; elide: Text.ElideRight
+            }
+            Row {
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: 0
+              Repeater {
+                model: root.data.artists || []
+                Text {
+                  textFormat: Text.PlainText
+                  id: expandedArtistLink
+                  required property var modelData
+                  required property int index
+                  text: modelData.name + (index < (root.data.artists || []).length - 1 ? ", " : "")
+                  color: expandedArtistMouse.containsMouse ? Color.accent : root.dim
+                  font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+                  MouseArea {
+                    id: expandedArtistMouse; anchors.fill: parent; hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.openCatalogArtist(expandedArtistLink.modelData.id)
+                  }
+                }
+              }
+              Text {
+                textFormat: Text.PlainText
+                id: expandedAlbumLink
+                visible: String(root.data.album || "") !== ""
+                text: (root.data.artists || []).length > 0
+                  ? "  ·  " + String(root.data.album) : String(root.data.album)
+                color: expandedAlbumMouse.containsMouse && String(root.data.albumId || "") !== ""
+                  ? Color.accent : root.dim
+                font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+                MouseArea {
+                  id: expandedAlbumMouse; anchors.fill: parent
+                  enabled: String(root.data.albumId || "") !== ""
+                  hoverEnabled: enabled
+                  cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                  onClicked: root.openCatalogAlbum(root.data.albumId)
+                }
+              }
+            }
+            Item {
+              width: parent.width - Style.space(12)
+              height: Style.space(28)
+              anchors.horizontalCenter: parent.horizontalCenter
+              Rectangle {
+                id: expandedProgressTrack
+                anchors.left: parent.left; anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                height: Style.space(6); radius: height / 2
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, .15)
+                Rectangle {
+                  width: parent.width * Math.min(1,
+                    root.displayPosition / Math.max(1, Number(root.data.duration || 1)))
+                  height: parent.height; radius: parent.radius; color: Color.accent
+                }
+                MouseArea {
+                  id: expandedSeekDrag
+                  anchors.fill: parent
+                  anchors.topMargin: -Style.space(8); anchors.bottomMargin: -Style.space(8)
+                  cursorShape: pressed ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+                  preventStealing: true
+                  onPressed: function(mouse) {
+                    root.seeking = true
+                    root.previewSeek(mouse, expandedSeekDrag)
+                  }
+                  onPositionChanged: function(mouse) {
+                    if (pressed) root.previewSeek(mouse, expandedSeekDrag)
+                  }
+                  onReleased: function(mouse) {
+                    root.previewSeek(mouse, expandedSeekDrag)
+                    root.commitSeek()
+                  }
+                  onCanceled: root.seeking = false
+                }
+              }
+              Text {
+                textFormat: Text.PlainText
+                anchors.left: parent.left; anchors.top: expandedProgressTrack.bottom
+                anchors.topMargin: Style.space(3)
+                text: root.formatTime(root.playbackPosition)
+                  + (root.seeking && root.pendingSeek >= 0
+                    ? "  (" + root.formatTime(root.pendingSeek) + ")" : "")
+                color: root.dim; font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+              Text {
+                textFormat: Text.PlainText
+                anchors.right: parent.right; anchors.top: expandedProgressTrack.bottom
+                anchors.topMargin: Style.space(3)
+                text: root.formatTime(root.data.duration)
+                color: root.dim; font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+            Item {
+              width: parent.width
+              height: Style.space(44)
+
+              Button {
+                id: expandedLikeButton
+                anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(40); height: Style.space(38)
+                horizontalPadding: 0; verticalPadding: 0
+                iconSize: Style.space(20)
+                iconText: root.data.liked ? "󰋑" : "󰋕"
+                tooltipText: root.data.liked
+                  ? "Убрать из «Мне нравится» (L)" : "Добавить в «Мне нравится» (L)"
+                foreground: root.data.liked ? Color.accent : root.foreground
+                onClicked: root.action("like")
+              }
+              Row {
+                anchors.centerIn: parent
+                spacing: Style.space(14)
+                Button {
+                  width: Style.space(42); height: Style.space(40)
+                  horizontalPadding: 0; verticalPadding: 0; iconSize: 22
+                  iconText: "󰒮"; tooltipText: "Предыдущий (P)"; foreground: root.foreground
+                  onClicked: root.action("previous")
+                }
+                Button {
+                  width: Style.space(46); height: Style.space(44); radius: height / 2
+                  horizontalPadding: 0; verticalPadding: 0; iconSize: 26
+                  tooltipText: root.playing ? "Пауза (Space)" : "Продолжить (Space)"
+                  foreground: Color.accent; bordered: true
+                  onClicked: root.action("pause")
+                  Text {
+                    textFormat: Text.PlainText
+                    z: 2; anchors.centerIn: parent
+                    anchors.horizontalCenterOffset: root.playing ? 0 : Style.space(2)
+                    text: root.playing ? "󰏤" : "󰐊"
+                    color: parent.foreground; font.family: root.fontFamily
+                    font.pixelSize: parent.iconSize
+                  }
+                }
+                Button {
+                  width: Style.space(42); height: Style.space(40)
+                  horizontalPadding: 0; verticalPadding: 0; iconSize: 22
+                  iconText: "󰒭"; tooltipText: "Следующий (N)"; foreground: root.foreground
+                  onClicked: root.action("next")
+                }
+              }
+              Button {
+                id: expandedMoreButton
+                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(40); height: Style.space(38)
+                horizontalPadding: 0; verticalPadding: 0
+                iconText: "󰇙"; iconSize: Style.space(20)
+                tooltipText: "Действия и настройки"
+                foreground: root.foreground
+                onClicked: root.openPlayerActions()
+              }
+            }
+          }
+
+          BorderSurface {
+            id: errorCard
+            visible: root.hasVisibleError && !root.coverExpanded
+            width: parent.width
+            height: visible ? errorContent.implicitHeight + Style.space(20) : 0
+            radius: Style.cornerRadius
+            color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, .08)
+            borderSpec: Border.controlSpec("normal", Color.urgent, Color.urgent)
+
+            Column {
+              id: errorContent
+              anchors.left: parent.left; anchors.right: parent.right
+              anchors.margins: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(5)
+
+              Row {
+                width: parent.width
+                spacing: Style.space(5)
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width - retryErrorButton.width - dismissErrorButton.width - Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.errorTitle
+                  color: Color.urgent; font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall; font.bold: true
+                }
+                Button {
+                  id: retryErrorButton
+                  iconText: "󰑐"; iconSize: Style.font.icon
+                  horizontalPadding: Style.space(5); verticalPadding: Style.space(3)
+                  tooltipText: "Повторить"; foreground: Color.urgent
+                  onClicked: root.retryLastOperation()
+                }
+                Button {
+                  id: dismissErrorButton
+                  iconText: "󰅖"; iconSize: Style.font.icon
+                  horizontalPadding: Style.space(5); verticalPadding: Style.space(3)
+                  tooltipText: "Скрыть"; foreground: root.dim
+                  onClicked: root.dismissedError = root.lastError
+                }
+              }
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                text: root.lastError; wrapMode: Text.WordWrap
+                color: root.foreground; font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+          }
+
+          Column {
+            visible: !root.authenticated; width: parent.width; spacing: Style.space(10)
+            Row {
+              visible: root.data.authPending === true && String(root.data.authCode || "") !== ""
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.space(8)
+
+              Text {
+                textFormat: Text.PlainText
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Код: " + root.data.authCode; color: root.foreground
+                font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true
+              }
+              Button {
+                width: Style.space(122); height: Style.space(32)
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.copiedAuthCode === String(root.data.authCode || "") ? "Скопировано" : "Копировать"
+                iconText: root.copiedAuthCode === String(root.data.authCode || "") ? "󰄬" : "󰆏"
+                tooltipText: "Скопировать код авторизации"
+                foreground: root.copiedAuthCode === String(root.data.authCode || "") ? Color.accent : root.foreground
+                bordered: true
+                onClicked: root.copyAuthCode()
+              }
+            }
+            BorderSurface {
+              width: parent.width; height: Style.space(44); radius: Style.cornerRadius
+              color: authMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : Style.normalFillFor(root.foreground, Color.accent)
+              borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+              Text {
+                textFormat: Text.PlainText
+                anchors.centerIn: parent
+                text: root.data.authUrl ? "Открыть страницу авторизации" : "Войти через Яндекс"
+                color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true
+              }
+              MouseArea {
+                id: authMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                onClicked: if (root.data.authUrl) Quickshell.execDetached(["xdg-open", String(root.data.authUrl)]); else root.action("auth")
+              }
+            }
+          }
+
+          Column {
+            id: authenticatedContent
+            visible: root.authenticated
+            width: parent.width
+            // Keep the popup equally tall in both cover states without
+            // distorting the square artwork or compacting player controls.
+            // Any difference between the two natural layouts becomes
+            // invisible space below this column.
+            height: root.coverExpanded ? 0
+              : implicitHeight + content.regularCoverHeightBalance
+            opacity: root.coverExpanded ? 0 : 1
+            spacing: Style.space(12)
+            clip: true
+            enabled: !root.coverExpanded
+            // While both animated blocks have a non-zero height, Column adds
+            // a second gap. Cancel it visually so removing the zero-height
+            // expanded block cannot move the tabs at the final frame.
+            transform: Translate {
+              y: expandedPlayer.height > 0 && authenticatedContent.height > 0
+                ? -content.spacing : 0
+            }
+            Behavior on height {
+              enabled: root.coverTransitioning
+              NumberAnimation {
+                duration: root.coverTransitionDuration
+                easing.type: Easing.OutCubic
+              }
+            }
+            Behavior on opacity {
+              NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+            }
+
+            Row {
+              visible: !root.settingsOpen
+              width: parent.width; spacing: Style.space(4)
+              Repeater {
+                model: ["СЕЙЧАС", "МЕДИАТЕКА", "ПОИСК"]
+                BorderSurface {
+                  required property string modelData
+                  required property int index
+                  width: (content.width - Style.space(8)) / 3; height: Style.space(34)
+                  radius: Style.cornerRadius
+                  color: root.page === index ? Style.selectedFillFor(root.foreground, Color.accent)
+                    : (tabMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent")
+                  borderSpec: root.page === index ? Border.controlSpec("normal", root.foreground, Color.accent) : Border.none()
+                  Text {
+                    textFormat: Text.PlainText
+                    anchors.centerIn: parent; text: modelData; color: root.foreground
+                    font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                    font.bold: root.page === index; font.letterSpacing: .5
+                  }
+                  MouseArea { id: tabMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.selectPage(index) }
+                }
+              }
+            }
+
+            Column {
+              visible: !root.settingsOpen && root.page === 0; width: parent.width; spacing: Style.space(14)
+
+              Item {
+                visible: root.hasTrack; width: parent.width; height: Style.space(28)
+                Rectangle {
+                  id: progressTrack; anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                  height: Style.space(6); radius: height / 2
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, .15)
+                  Rectangle {
+                    width: parent.width * Math.min(1, root.displayPosition / Math.max(1, Number(root.data.duration || 1)))
+                    height: parent.height; radius: parent.radius; color: Color.accent
+                  }
+                  MouseArea {
+                    id: seekDrag
+                    anchors.fill: parent
+                    anchors.topMargin: -Style.space(8); anchors.bottomMargin: -Style.space(8)
+                    cursorShape: pressed ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+                    preventStealing: true
+                    onPressed: function(mouse) {
+                      root.seeking = true
+                      root.previewSeek(mouse, seekDrag)
+                    }
+                    onPositionChanged: function(mouse) {
+                      if (pressed) root.previewSeek(mouse, seekDrag)
+                    }
+                    onReleased: function(mouse) {
+                      root.previewSeek(mouse, seekDrag)
+                      root.commitSeek()
+                    }
+                    onCanceled: root.seeking = false
+                  }
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.left: parent.left; anchors.top: progressTrack.bottom; anchors.topMargin: Style.space(3)
+                  text: root.formatTime(root.playbackPosition)
+                    + (root.seeking && root.pendingSeek >= 0 ? "  (" + root.formatTime(root.pendingSeek) + ")" : "")
+                  color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.right: parent.right; anchors.top: progressTrack.bottom; anchors.topMargin: Style.space(3)
+                  text: root.formatTime(root.data.duration); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                }
+              }
+
+              Column {
+                id: playerControls
+                width: parent.width
+                spacing: Style.space(7)
+
+                Item {
+                  width: parent.width
+                  height: Style.space(44)
+
+                  Button {
+                    id: likeButton
+                    anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(40); height: Style.space(38)
+                    horizontalPadding: 0; verticalPadding: 0
+                    iconSize: Style.space(20)
+                    iconText: root.data.liked ? "󰋑" : "󰋕"
+                    tooltipText: root.data.liked
+                      ? "Убрать из «Мне нравится» (L)" : "Добавить в «Мне нравится» (L)"
+                    foreground: root.data.liked ? Color.accent : root.foreground
+                    enabled: root.hasTrack; opacity: enabled ? 1 : .4
+                    onClicked: root.action("like")
+                  }
+                  Row {
+                    anchors.centerIn: parent
+                    spacing: Style.space(14)
+                    Button {
+                      width: Style.space(42); height: Style.space(40)
+                      horizontalPadding: 0; verticalPadding: 0; iconSize: 22
+                      iconText: "󰒮"; tooltipText: "Предыдущий (P)"; foreground: root.foreground
+                      enabled: root.hasTrack; opacity: enabled ? 1 : .4
+                      onClicked: root.action("previous")
+                    }
+                    Button {
+                      width: Style.space(46); height: Style.space(44); radius: height / 2
+                      horizontalPadding: 0; verticalPadding: 0; iconSize: 26
+                      tooltipText: root.playing ? "Пауза (Space)" : "Продолжить (Space)"
+                      foreground: Color.accent; bordered: true
+                      enabled: root.hasTrack; opacity: enabled ? 1 : .4
+                      onClicked: root.action("pause")
+                      Text {
+                        textFormat: Text.PlainText
+                        z: 2; anchors.centerIn: parent
+                        anchors.horizontalCenterOffset: root.playing ? 0 : Style.space(2)
+                        text: root.playing ? "󰏤" : "󰐊"
+                        color: parent.foreground; font.family: root.fontFamily
+                        font.pixelSize: parent.iconSize
+                      }
+                    }
+                    Button {
+                      width: Style.space(42); height: Style.space(40)
+                      horizontalPadding: 0; verticalPadding: 0; iconSize: 22
+                      iconText: "󰒭"; tooltipText: "Следующий (N)"; foreground: root.foreground
+                      enabled: root.hasTrack; opacity: enabled ? 1 : .4
+                      onClicked: root.action("next")
+                    }
+                  }
+                  Button {
+                    id: moreActionsButton
+                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(40); height: Style.space(38)
+                    horizontalPadding: 0; verticalPadding: 0
+                    iconText: "󰇙"; iconSize: Style.space(20)
+                    tooltipText: "Действия и настройки"
+                    foreground: root.foreground
+                    onClicked: root.openPlayerActions()
+                  }
+                }
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                visible: !root.hasTrack && !root.browsingLibrary
+                width: parent.width; horizontalAlignment: Text.AlignHCenter
+                text: "Выберите плейлист в медиатеке или найдите трек"
+                color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+              }
+
+              PanelSeparator {
+                visible: root.hasTrack || root.browsingLibrary
+                  || root.queueListLoading || root.trackListDisplay.length > 0
+                foreground: root.foreground
+              }
+
+              Row {
+                id: currentTrackPaneTabs
+                visible: root.hasTrack
+                width: parent.width
+                height: visible ? Style.space(30) : 0
+                spacing: Style.space(8)
+
+                Repeater {
+                  model: [
+                    { label: "СПИСОК", pane: 0 },
+                    { label: "ТЕКСТ", pane: 1 },
+                    { label: "О ТРЕКЕ", pane: 2 }
+                  ]
+                  Item {
+                    required property var modelData
+                    readonly property bool selected: (modelData.pane === 0
+                        && !root.currentTrackPaneOpen)
+                      || (modelData.pane === 1 && root.lyricsOpen)
+                      || (modelData.pane === 2 && root.trackInfoOpen)
+                    width: (currentTrackPaneTabs.width - currentTrackPaneTabs.spacing * 2) / 3
+                    height: currentTrackPaneTabs.height
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.centerIn: parent
+                      text: modelData.label
+                      color: parent.selected ? Color.accent : root.dim
+                      font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                      font.bold: parent.selected; font.letterSpacing: .6
+                    }
+                    Rectangle {
+                      anchors.left: parent.left; anchors.right: parent.right
+                      anchors.bottom: parent.bottom
+                      height: Style.space(2); radius: height / 2
+                      color: Color.accent
+                      opacity: parent.selected ? 1 : 0
+                      Behavior on opacity { NumberAnimation { duration: 120 } }
+                    }
+                    MouseArea {
+                      anchors.fill: parent
+                      hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                      onClicked: root.selectCurrentTrackPane(modelData.pane)
+                    }
+                  }
+                }
+              }
+
+              Item {
+                visible: root.hasTrack || root.browsingLibrary
+                  || root.queueListLoading || root.trackListDisplay.length > 0
+                width: parent.width
+                height: visible ? Style.space(24) : 0
+                clip: true
+
+                Button {
+                  id: returnToQueueButton
+                  visible: root.browsingCollection && !root.currentTrackPaneOpen
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: visible ? Style.space(24) : 0
+                  height: Style.space(24)
+                  horizontalPadding: 0; verticalPadding: 0
+                  iconText: "󰁍"; iconSize: Style.font.icon
+                  tooltipText: "Вернуться к очереди"
+                  foreground: Color.accent
+                  enabled: !root.busy
+                  onClicked: root.action("close_library")
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  id: queueHeading
+                  visible: !root.queueListLoading || root.currentTrackPaneOpen
+                  anchors.left: returnToQueueButton.visible ? returnToQueueButton.right : parent.left
+                  anchors.leftMargin: returnToQueueButton.visible ? Style.space(6) : 0
+                  anchors.right: queuePosition.left
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.trackInfoOpen ? "СВЕДЕНИЯ И УЧАСТНИКИ"
+                    : (root.lyricsOpen ? "ТЕКСТ ПЕСНИ"
+                    : (root.browsingLibrary
+                      ? "МЕДИАТЕКА · " + String(root.data.libraryBrowseName || "")
+                      : "ОЧЕРЕДЬ" + (root.data.queueName ? " · " + root.data.queueName : "")))
+                  elide: Text.ElideRight
+                  color: root.dim; font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption; font.letterSpacing: 1
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  id: queuePosition
+                  visible: !root.queueListLoading || root.currentTrackPaneOpen
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.trackInfoOpen ? (root.trackInfoLoading ? "…" : "")
+                    : (root.lyricsOpen
+                      ? (root.lyricsLoading ? "…" : (root.lyricsData.synced ? "LRC"
+                        : (root.lyricsData.available ? "TEXT" : "")))
+                    : (root.browsingLibrary && Number(root.data.libraryTotal || 0) > root.trackListDisplay.length
+                      ? root.trackListDisplay.length + "/" + Number(root.data.libraryTotal || 0)
+                      : (root.browsingCollection ? String(root.trackListDisplay.length)
+                      : (root.data.queueCount ? root.data.queueIndex + "/" + root.data.queueCount : ""))))
+                  color: root.lyricsOpen && root.lyricsData.synced ? Color.accent : root.dim
+                  font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                }
+
+                Rectangle {
+                  visible: root.queueListLoading && !root.currentTrackPaneOpen
+                  anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width * .48; height: Style.space(7); radius: height / 2
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, .1)
+                }
+                Rectangle {
+                  visible: root.queueListLoading && !root.currentTrackPaneOpen
+                  anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(48); height: Style.space(7); radius: height / 2
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, .07)
+                }
+                Rectangle {
+                  id: queueHeaderShimmer
+                  visible: root.queueListLoading && !root.currentTrackPaneOpen
+                  width: parent.width * .16; height: parent.height
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, .045)
+                  rotation: 8
+                  NumberAnimation on x {
+                    from: -queueHeaderShimmer.width
+                    to: queueHeaderShimmer.parent.width + queueHeaderShimmer.width
+                    duration: 1050; loops: Animation.Infinite
+                    easing.type: Easing.InOutQuad
+                    running: root.queueListLoading && !root.currentTrackPaneOpen
+                  }
+                }
+              }
+
+              SkeletonList {
+                visible: !root.currentTrackPaneOpen && root.queueListLoading
+                width: parent.width
+                height: visible ? Style.space(260) : 0
+                rowCount: 5
+                foreground: root.foreground
+              }
+
+              Item {
+                visible: !root.currentTrackPaneOpen && root.browsingLibrary
+                  && !root.queueListLoading && root.trackListDisplay.length === 0
+                width: parent.width; height: visible ? Style.space(260) : 0
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.centerIn: parent
+                  text: "Плейлист пока пуст"
+                  color: root.dim; font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              ListView {
+                id: queueList
+                visible: !root.currentTrackPaneOpen && !root.queueListLoading
+                  && root.trackListDisplay.length > 0
+                width: parent.width
+                height: visible ? Style.space(260) : 0
+                clip: true
+                model: root.trackListDisplay
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: contentHeight > height
+                cacheBuffer: height
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                onContentYChanged: root.maybeLoadMoreLibrary()
+                onMovementEnded: root.maybeLoadMoreLibrary()
+
+                delegate: BorderSurface {
+                  id: queueRow
+                  required property var modelData
+                  readonly property bool isCurrent: !root.browsingCollection
+                    && Number(root.data.queueIndex || 0) - 1 === Number(modelData.index)
+                  readonly property bool hovered: queueHover.hovered
+                  width: queueList.width - (queueList.contentHeight > queueList.height ? Style.space(8) : 0)
+                  height: Style.space(50)
+                  radius: Style.cornerRadius
+                  color: isCurrent
+                    ? Style.selectedFillFor(root.foreground, Color.accent)
+                    : (queueRow.hovered ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent")
+                  borderSpec: isCurrent
+                    ? Border.controlSpec("normal", root.foreground, Color.accent)
+                    : Border.none()
+
+                  HoverHandler { id: queueHover }
+
+                  Row {
+                    z: 1
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.leftMargin: Style.space(10); anchors.rightMargin: Style.space(10)
+                    anchors.verticalCenter: parent.verticalCenter; spacing: Style.space(9)
+
+                    Text {
+                      textFormat: Text.PlainText
+                      width: Style.space(18); anchors.verticalCenter: parent.verticalCenter
+                      horizontalAlignment: Text.AlignHCenter
+                      text: queueRow.isCurrent ? (root.playing ? "󰏤" : "󰐊") : String(modelData.index + 1)
+                      color: queueRow.isCurrent ? Color.accent : root.dim
+                      font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                    }
+                    Column {
+                      width: parent.width - Style.space(76); anchors.verticalCenter: parent.verticalCenter; spacing: 1
+                      Text {
+                        textFormat: Text.PlainText
+                        width: parent.width; text: modelData.title; elide: Text.ElideRight
+                        color: root.foreground; font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall; font.bold: queueRow.isCurrent
+                      }
+                      Item {
+                        width: parent.width
+                        height: Style.space(14)
+                        clip: true
+                        Row {
+                          anchors.left: parent.left
+                          anchors.verticalCenter: parent.verticalCenter
+                          spacing: 0
+                          Repeater {
+                            model: queueRow.modelData.artists || []
+                            Text {
+                              textFormat: Text.PlainText
+                              id: queueArtistLink
+                              required property var modelData
+                              required property int index
+                              text: modelData.name + (index < (queueRow.modelData.artists || []).length - 1 ? ", " : "")
+                              color: queueArtistMouse.containsMouse ? Color.accent : root.dim
+                              font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                              MouseArea {
+                                id: queueArtistMouse; anchors.fill: parent
+                                hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openCatalogArtist(queueArtistLink.modelData.id)
+                              }
+                            }
+                          }
+                          Text {
+                            textFormat: Text.PlainText
+                            id: queueAlbumLink
+                            visible: String(queueRow.modelData.album || "") !== ""
+                            text: (queueRow.modelData.artists || []).length > 0
+                              ? " · " + String(queueRow.modelData.album) : String(queueRow.modelData.album)
+                            color: queueAlbumMouse.containsMouse && String(queueRow.modelData.albumId || "") !== ""
+                              ? Color.accent : root.dim
+                            font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                            MouseArea {
+                              id: queueAlbumMouse; anchors.fill: parent
+                              enabled: String(queueRow.modelData.albumId || "") !== ""
+                              hoverEnabled: enabled
+                              cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                              onClicked: root.openCatalogAlbum(queueRow.modelData.albumId)
+                            }
+                          }
+                        }
+                      }
+                    }
+                    Item {
+                      width: Style.space(40); height: Style.space(26)
+                      anchors.verticalCenter: parent.verticalCenter
+                      Text {
+                        textFormat: Text.PlainText
+                        visible: !queueRow.hovered
+                        anchors.fill: parent
+                        verticalAlignment: Text.AlignVCenter
+                        horizontalAlignment: Text.AlignRight
+                        text: root.formatTime(modelData.duration)
+                        color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                      }
+                      Button {
+                        visible: queueRow.hovered
+                        width: Style.space(26); height: Style.space(26)
+                        anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                        horizontalPadding: 0; verticalPadding: 0
+                        iconText: "󰐒"; iconSize: Style.font.icon
+                        tooltipText: root.browsingLibrary && root.data.libraryEditable === true
+                          ? "Добавить или удалить из плейлиста" : "Добавить в плейлист"
+                        foreground: root.dim
+                        onClicked: root.openCollectionTrack(
+                          root.browsingLibrary ? "library" : "queue", Number(modelData.index), modelData,
+                          root.browsingLibrary && root.data.libraryEditable === true,
+                          String(root.data.libraryPlaylistKind || ""),
+                          String(root.data.libraryBrowseName || ""))
+                      }
+                    }
+                  }
+                  MouseArea {
+                    id: queueMouse; anchors.fill: parent
+                    anchors.rightMargin: Style.space(36)
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      if (root.browsingLibrary) root.action("play_library_track", modelData.index)
+                      else if (!queueRow.isCurrent) root.action("play_queue", modelData.index)
+                    }
+                  }
+                }
+
+                footer: Item {
+                  width: queueList.width
+                  height: root.data.libraryLoadingMore === true ? Style.space(36) : 0
+                  Text {
+                    textFormat: Text.PlainText
+                    visible: root.data.libraryLoadingMore === true
+                    anchors.centerIn: parent
+                    text: "󰔟  Загружаем ещё 50…"
+                    color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+
+              SkeletonList {
+                visible: root.lyricsOpen && root.lyricsLoading
+                width: parent.width
+                height: visible ? Style.space(260) : 0
+                rowCount: 5
+                foreground: root.foreground
+              }
+
+              Item {
+                visible: root.lyricsOpen && !root.lyricsLoading
+                  && (!root.lyricsData.available || root.lyricsLines.length === 0)
+                width: parent.width
+                height: visible ? Style.space(260) : 0
+
+                Column {
+                  anchors.centerIn: parent
+                  width: parent.width - Style.space(32)
+                  spacing: Style.space(10)
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    text: String(root.lyricsData.error || "") !== ""
+                      ? String(root.lyricsData.error) : "Текст этой песни недоступен"
+                    color: String(root.lyricsData.error || "") !== "" ? Color.urgent : root.dim
+                    font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+                  }
+                  Button {
+                    visible: String(root.lyricsData.error || "") !== ""
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "Повторить"; iconText: "󰑐"; bordered: true
+                    foreground: root.foreground
+                    enabled: !lyricsProcess.running
+                    onClicked: root.refreshLyrics(true)
+                  }
+                }
+              }
+
+              ListView {
+                id: lyricsList
+                visible: root.lyricsOpen && !root.lyricsLoading
+                  && root.lyricsData.available && root.lyricsLines.length > 0
+                width: parent.width
+                height: visible ? Style.space(260) : 0
+                clip: true
+                model: root.lyricsLines
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: contentHeight > height
+                cacheBuffer: height
+                spacing: Style.space(2)
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                onMovementStarted: {
+                  root.lyricsAutoScroll = false
+                  lyricsResumeScrollTimer.stop()
+                }
+                onMovementEnded: lyricsResumeScrollTimer.restart()
+
+                delegate: BorderSurface {
+                  id: lyricRow
+                  required property var modelData
+                  required property int index
+                  readonly property bool isCurrent: index === root.lyricsCurrentIndex
+                  readonly property bool canSeek: root.lyricsData.synced && Number(modelData.time) >= 0
+                  width: lyricsList.width
+                    - (lyricsList.contentHeight > lyricsList.height ? Style.space(8) : 0)
+                  height: String(modelData.text || "") === "" ? Style.space(18)
+                    : Math.max(Style.space(38), lyricText.implicitHeight + Style.space(14))
+                  radius: Style.cornerRadius
+                  color: isCurrent
+                    ? Style.selectedFillFor(root.foreground, Color.accent)
+                    : (lyricMouse.containsMouse && canSeek
+                      ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent")
+                  borderSpec: isCurrent
+                    ? Border.controlSpec("normal", root.foreground, Color.accent) : Border.none()
+
+                  Text {
+                    textFormat: Text.PlainText
+                    id: lyricText
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.margins: Style.space(9)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: String(lyricRow.modelData.text || "")
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: lyricRow.isCurrent ? Color.accent
+                      : (root.lyricsData.synced ? root.dim : root.foreground)
+                    font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+                    font.bold: lyricRow.isCurrent
+                  }
+                  MouseArea {
+                    id: lyricMouse
+                    anchors.fill: parent
+                    enabled: lyricRow.canSeek
+                    hoverEnabled: true
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: root.seekToLyric(lyricRow.modelData.time)
+                  }
+                }
+
+                footer: Text {
+                  textFormat: Text.PlainText
+                  width: lyricsList.width
+                  height: visible ? contentHeight + Style.space(20) : 0
+                  visible: (root.lyricsData.writers || []).length > 0
+                  topPadding: Style.space(10)
+                  horizontalAlignment: Text.AlignHCenter
+                  wrapMode: Text.WordWrap
+                  text: "Авторы текста: " + (root.lyricsData.writers || []).join(", ")
+                  color: root.dim; font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              SkeletonList {
+                visible: root.trackInfoOpen && root.trackInfoLoading
+                width: parent.width
+                height: visible ? Style.space(260) : 0
+                rowCount: 5
+                foreground: root.foreground
+              }
+
+              Item {
+                visible: root.trackInfoOpen && !root.trackInfoLoading
+                  && root.trackInfoRows.length === 0
+                width: parent.width
+                height: visible ? Style.space(260) : 0
+
+                Column {
+                  anchors.centerIn: parent
+                  width: parent.width - Style.space(32)
+                  spacing: Style.space(10)
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    text: String(root.trackInfoData.error || "") !== ""
+                      ? String(root.trackInfoData.error) : "Подробные сведения недоступны"
+                    color: String(root.trackInfoData.error || "") !== "" ? Color.urgent : root.dim
+                    font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+                  }
+                  Button {
+                    visible: String(root.trackInfoData.error || "") !== ""
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "Повторить"; iconText: "󰑐"; bordered: true
+                    foreground: root.foreground
+                    enabled: !trackInfoProcess.running
+                    onClicked: root.refreshTrackInfo(true)
+                  }
+                }
+              }
+
+              ListView {
+                id: trackInfoList
+                visible: root.trackInfoOpen && !root.trackInfoLoading
+                  && root.trackInfoRows.length > 0
+                width: parent.width
+                height: visible ? Style.space(260) : 0
+                clip: true
+                model: root.trackInfoRows
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: contentHeight > height
+                cacheBuffer: height
+                spacing: Style.space(4)
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                delegate: BorderSurface {
+                  id: trackInfoRow
+                  required property var modelData
+                  readonly property bool isSection: String(modelData.kind || "") === "section"
+                  width: trackInfoList.width
+                    - (trackInfoList.contentHeight > trackInfoList.height ? Style.space(8) : 0)
+                  height: isSection ? Style.space(28)
+                    : Math.max(Style.space(44), trackInfoRowContent.implicitHeight + Style.space(14))
+                  radius: Style.cornerRadius
+                  color: isSection ? "transparent"
+                    : (trackInfoLink.containsMouse && String(modelData.entityId || "") !== ""
+                      ? Style.hoverFillFor(root.foreground, Color.accent)
+                      : Style.normalFillFor(root.foreground, Color.accent))
+                  borderSpec: Border.none()
+
+                  MouseArea {
+                    id: trackInfoLink
+                    z: 2
+                    anchors.fill: parent
+                    enabled: String(trackInfoRow.modelData.entityId || "") !== ""
+                    hoverEnabled: enabled
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: if (trackInfoRow.modelData.entityType === "album")
+                      root.openCatalogAlbum(trackInfoRow.modelData.entityId)
+                  }
+
+                  Column {
+                    id: trackInfoRowContent
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.margins: trackInfoRow.isSection ? 0 : Style.space(9)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(2)
+                    Text {
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      text: String(trackInfoRow.modelData.label || "")
+                      color: trackInfoRow.isSection ? root.dim : Color.accent
+                      font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                      font.bold: trackInfoRow.isSection
+                      font.letterSpacing: trackInfoRow.isSection ? .7 : 0
+                    }
+                    Text {
+                      textFormat: Text.PlainText
+                      visible: !trackInfoRow.isSection
+                      width: parent.width
+                      text: String(trackInfoRow.modelData.value || "")
+                      wrapMode: Text.WordWrap
+                      color: root.foreground; font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+                }
+
+                footer: Item {
+                  width: trackInfoList.width
+                  height: String(root.trackInfoData.error || "") !== ""
+                    ? trackInfoErrorContent.implicitHeight + Style.space(20) : 0
+                  Column {
+                    id: trackInfoErrorContent
+                    visible: String(root.trackInfoData.error || "") !== ""
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.margins: Style.space(10)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(8)
+                    Text {
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      horizontalAlignment: Text.AlignHCenter
+                      wrapMode: Text.WordWrap
+                      text: String(root.trackInfoData.error || "")
+                      color: Color.urgent; font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    Button {
+                      anchors.horizontalCenter: parent.horizontalCenter
+                      text: "Повторить"; iconText: "󰑐"; bordered: true
+                      foreground: root.foreground
+                      enabled: !trackInfoProcess.running
+                      onClicked: root.refreshTrackInfo(true)
+                    }
+                  }
+                }
+              }
+            }
+
+            Column {
+              visible: !root.settingsOpen && root.page === 1; width: parent.width; spacing: Style.space(6)
+              BorderSurface {
+                width: parent.width; height: Style.space(48); radius: Style.cornerRadius
+                color: waveMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent)
+                  : Style.normalFillFor(root.foreground, Color.accent)
+                borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.left: parent.left; anchors.leftMargin: Style.space(12); anchors.verticalCenter: parent.verticalCenter
+                  text: "󰝚   Моя волна"; color: root.foreground; font.family: root.fontFamily
+                  font.pixelSize: Style.font.body; font.bold: true
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.right: parent.right; anchors.rightMargin: Style.space(12); anchors.verticalCenter: parent.verticalCenter
+                  text: root.waveOptionsOpen ? "󰅃" : "󰅀"
+                  color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.body
+                }
+                MouseArea {
+                  id: waveMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                  onClicked: root.waveOptionsOpen = !root.waveOptionsOpen
+                }
+              }
+
+              Column {
+                visible: root.waveOptionsOpen
+                width: parent.width
+                spacing: Style.space(7)
+
+                Dropdown {
+                  x: Style.space(8); width: parent.width - Style.space(16)
+                  label: "Настроение"
+                  value: String(root.preference("waveMood", "all"))
+                  foreground: root.foreground; fontFamily: root.fontFamily
+                  options: [
+                    { value: "all", label: "Любое" },
+                    { value: "fun", label: "Весёлое" },
+                    { value: "active", label: "Энергичное" },
+                    { value: "calm", label: "Спокойное" },
+                    { value: "sad", label: "Грустное" }
+                  ]
+                  onChanged: function(value) { root.setPreference("waveMood", value) }
+                }
+                Dropdown {
+                  x: Style.space(8); width: parent.width - Style.space(16)
+                  label: "Подбор треков"
+                  value: String(root.preference("waveDiversity", "default"))
+                  foreground: root.foreground; fontFamily: root.fontFamily
+                  options: [
+                    { value: "default", label: "Сбалансированный" },
+                    { value: "favorite", label: "Больше любимого" },
+                    { value: "popular", label: "Популярное" },
+                    { value: "discover", label: "Больше нового" }
+                  ]
+                  onChanged: function(value) { root.setPreference("waveDiversity", value) }
+                }
+                Dropdown {
+                  x: Style.space(8); width: parent.width - Style.space(16)
+                  label: "Язык"
+                  value: String(root.preference("waveLanguage", "any"))
+                  foreground: root.foreground; fontFamily: root.fontFamily
+                  options: [
+                    { value: "any", label: "Любой" },
+                    { value: "russian", label: "Русская музыка" },
+                    { value: "not-russian", label: "Зарубежная музыка" }
+                  ]
+                  onChanged: function(value) { root.setPreference("waveLanguage", value) }
+                }
+                Button {
+                  x: Style.space(8); width: parent.width - Style.space(16)
+                  text: settingsProcess.running ? "Сохраняем настройки…" : "Запустить Мою волну"
+                  iconText: "󰐊"; foreground: root.foreground; bordered: true
+                  enabled: !settingsProcess.running; opacity: enabled ? 1 : .5
+                  onClicked: {
+                    root.action("wave")
+                    root.waveOptionsOpen = false
+                    root.selectPage(0)
+                  }
+                }
+              }
+
+              Item {
+                id: libraryViewport
+                width: parent.width
+                height: Style.space(360)
+                clip: true
+
+                TextField {
+                  id: stationSearchField
+                  visible: libraryController.stationMode
+                  anchors.top: parent.top
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  height: visible ? Style.space(36) : 0
+                  placeholderText: "Найти радиостанцию"
+                  foreground: root.foreground
+                  font.family: root.fontFamily
+                  text: libraryController.stationQuery
+                  onTextEdited: {
+                    libraryController.setStationQuery(text)
+                    libraryList.positionViewAtBeginning()
+                  }
+                  onVisibleChanged: {
+                    if (visible) {
+                      Qt.callLater(function() {
+                        if (stationSearchField.visible && !root.settingsOpen)
+                          stationSearchField.forceActiveFocus()
+                      })
+                    } else {
+                      focus = false
+                      Qt.callLater(function() {
+                        if (root.opened && !root.settingsOpen) keyCatcher.forceActiveFocus()
+                      })
+                    }
+                  }
+                  Keys.onEscapePressed: {
+                    if (text !== "") {
+                      libraryController.setStationQuery("")
+                      libraryList.positionViewAtBeginning()
+                    } else {
+                      focus = false
+                      keyCatcher.forceActiveFocus()
+                    }
+                  }
+                }
+
+                SkeletonList {
+                  visible: libraryController.loading
+                  anchors.top: stationSearchField.visible ? stationSearchField.bottom : parent.top
+                  anchors.topMargin: stationSearchField.visible ? Style.space(6) : 0
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.bottom: parent.bottom
+                  rowCount: 7
+                  foreground: root.foreground
+                }
+
+                ListView {
+                  id: libraryList
+                  property bool stationPageScheduled: false
+                  visible: !libraryController.loading
+                  anchors.top: stationSearchField.visible ? stationSearchField.bottom : parent.top
+                  anchors.topMargin: stationSearchField.visible ? Style.space(6) : 0
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.bottom: parent.bottom
+                  clip: true
+                  boundsBehavior: Flickable.StopAtBounds
+                  interactive: contentHeight > height
+                  cacheBuffer: height * 2
+                  model: root.libraryRows
+                  spacing: Style.space(2)
+                  ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                  function requestStationPageNearEnd() {
+                    if (stationPageScheduled || !libraryController.stationMode
+                        || !libraryController.hasMore) return
+                    var remaining = contentHeight - (contentY + height)
+                    if (remaining > Style.space(116)) return
+                    stationPageScheduled = true
+                    Qt.callLater(function() {
+                      stationPageScheduled = false
+                      var currentRemaining = contentHeight - (contentY + height)
+                      if (libraryController.stationMode && libraryController.hasMore
+                          && currentRemaining <= Style.space(116))
+                        libraryController.requestMore()
+                    })
+                  }
+
+                  onContentYChanged: requestStationPageNearEnd()
+                  onContentHeightChanged: requestStationPageNearEnd()
+                  onHeightChanged: requestStationPageNearEnd()
+                  onMovementEnded: requestStationPageNearEnd()
+
+                  delegate: BorderSurface {
+                    id: libraryRow
+                    required property var modelData
+                    readonly property string rowKind: String(modelData.kind || "")
+                    readonly property var value: modelData.value || ({})
+                    readonly property bool entityRow: ["track", "artist", "album", "playlist", "station"].indexOf(rowKind) >= 0
+                    readonly property bool actionable: ["collection", "navigation", "back", "retry", "loadMore",
+                      "track", "artist", "album", "playlist", "station"].indexOf(rowKind) >= 0
+                    readonly property bool hovered: libraryHover.hovered
+                    width: libraryList.width
+                      - (libraryList.contentHeight > libraryList.height ? Style.space(8) : 0)
+                    height: rowKind === "section" ? Style.space(30)
+                      : (entityRow || rowKind === "collection" || rowKind === "navigation"
+                        ? Style.space(58) : Style.space(42))
+                    radius: Style.cornerRadius
+                    opacity: libraryRow.value.available === false ? .45 : 1
+                    color: actionable && libraryRow.value.available !== false && libraryRow.hovered
+                      ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+                    borderSpec: Border.none()
+
+                    HoverHandler { id: libraryHover }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      visible: ["section", "error", "warning", "empty", "back", "retry", "loadMore"].indexOf(libraryRow.rowKind) >= 0
+                      anchors.left: parent.left; anchors.right: parent.right
+                      anchors.margins: Style.space(10); anchors.verticalCenter: parent.verticalCenter
+                      text: (libraryRow.rowKind === "back"
+                        ? String(libraryRow.modelData.icon || "") + "  " : "")
+                        + String(libraryRow.modelData.title || "")
+                      color: libraryRow.rowKind === "error" ? Color.urgent
+                        : (["back", "retry", "loadMore"].indexOf(libraryRow.rowKind) >= 0 ? Color.accent : root.dim)
+                      horizontalAlignment: ["back", "retry", "loadMore", "empty"].indexOf(libraryRow.rowKind) >= 0
+                        ? Text.AlignHCenter : Text.AlignLeft
+                      elide: Text.ElideRight
+                      font.family: root.fontFamily
+                      font.pixelSize: libraryRow.rowKind === "section" ? Style.font.caption : Style.font.bodySmall
+                      font.bold: libraryRow.rowKind === "section"
+                        || ["back", "retry", "loadMore"].indexOf(libraryRow.rowKind) >= 0
+                      font.letterSpacing: libraryRow.rowKind === "section" ? .8 : 0
+                    }
+
+                    Row {
+                      z: 2
+                      visible: libraryRow.rowKind === "collection" || libraryRow.rowKind === "navigation"
+                        || libraryRow.entityRow
+                      anchors.left: parent.left; anchors.right: parent.right
+                      anchors.margins: Style.space(9); anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(9)
+
+                      CatalogImage {
+                        visible: libraryRow.entityRow
+                        width: visible ? Style.space(40) : 0; height: width
+                        requestedSource: String(libraryRow.value.artUrl || "")
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        fillMode: Image.PreserveAspectCrop
+                      }
+                      Text {
+                        textFormat: Text.PlainText
+                        visible: !libraryRow.entityRow
+                        width: visible ? Style.space(40) : 0
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: String(libraryRow.modelData.icon || "󰁔")
+                        horizontalAlignment: Text.AlignHCenter
+                        color: Color.accent; font.family: root.fontFamily
+                        font.pixelSize: Style.font.subtitle
+                      }
+                      Column {
+                        width: parent.width - Style.space(49)
+                          - (libraryRow.rowKind === "track" ? Style.space(35) : 0)
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 1
+                        Text {
+                          textFormat: Text.PlainText
+                          width: parent.width
+                          text: String(libraryRow.entityRow
+                            ? (libraryRow.value.title || libraryRow.value.name || "Без названия")
+                            : libraryRow.modelData.title || "")
+                          color: root.foreground; font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight
+                        }
+                        Text {
+                          textFormat: Text.PlainText
+                          width: parent.width
+                          text: {
+                            if (!libraryRow.entityRow) return String(libraryRow.modelData.subtitle || "")
+                            var details = String(libraryRow.value.artist || libraryRow.value.ownerName
+                              || libraryRow.value.subtitle || (libraryRow.value.genres || []).join(", ") || "")
+                            if (details === "" && Number(libraryRow.value.trackCount || 0) > 0)
+                              details = Number(libraryRow.value.trackCount) + " треков"
+                            var date = String(libraryRow.value.historyDate || "")
+                            return details + (date !== "" ? (details !== "" ? " · " : "") + date : "")
+                          }
+                          color: root.dim; font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption; elide: Text.ElideRight
+                        }
+                      }
+                      Button {
+                        visible: libraryRow.rowKind === "track" && libraryRow.hovered
+                        width: libraryRow.rowKind === "track" ? Style.space(26) : 0
+                        height: Style.space(26)
+                        anchors.verticalCenter: parent.verticalCenter
+                        horizontalPadding: 0; verticalPadding: 0
+                        iconText: "󰐒"; iconSize: Style.font.icon
+                        tooltipText: "Добавить в плейлист"
+                        foreground: root.dim
+                        onClicked: root.openCollectionTrack(
+                          "libraryHub", Number(libraryRow.value.trackIndex || 0), libraryRow.value,
+                          false, "", "")
+                      }
+                    }
+
+                    MouseArea {
+                      id: libraryMouse
+                      anchors.fill: parent
+                      anchors.rightMargin: libraryRow.rowKind === "track" ? Style.space(36) : 0
+                      enabled: libraryRow.actionable
+                        && libraryRow.value.available !== false
+                      hoverEnabled: enabled
+                      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                      onClicked: libraryController.activate(libraryRow.modelData)
+                    }
+                  }
+                }
+              }
+            }
+
+            Column {
+              visible: !root.settingsOpen && root.page === 2
+              width: parent.width
+              spacing: Style.space(6)
+
+              Row {
+                visible: String(root.catalogDisplay.view || "search") === "search"
+                width: parent.width
+                height: visible ? Style.space(36) : 0
+                spacing: Style.space(8)
+                TextField {
+                  id: searchField
+                  width: parent.width - searchButton.width - parent.spacing
+                  placeholderText: "Трек, исполнитель, альбом или плейлист"
+                  foreground: root.foreground
+                  font.family: root.fontFamily
+                  rightPadding: Style.space(34)
+                  onTextEdited: catalogController.updateInput(text)
+                  Keys.onDownPressed: function(event) {
+                    if (!catalogController.moveSuggestion(1)) return
+                    suggestionList.positionViewAtIndex(
+                      catalogController.highlightedSuggestionIndex, ListView.Contain)
+                    event.accepted = true
+                  }
+                  Keys.onUpPressed: function(event) {
+                    if (!catalogController.moveSuggestion(-1)) return
+                    suggestionList.positionViewAtIndex(
+                      catalogController.highlightedSuggestionIndex, ListView.Contain)
+                    event.accepted = true
+                  }
+                  Keys.onReturnPressed: {
+                    if (catalogController.acceptHighlightedSuggestion())
+                      text = catalogController.fieldText
+                    else
+                      catalogController.submit()
+                  }
+                  Keys.onEscapePressed: {
+                    catalogController.dismissSuggestions()
+                    focus = false
+                    keyCatcher.forceActiveFocus()
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    z: 2
+                    visible: catalogController.suggestionLoading
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(9)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "󰦖"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    RotationAnimator on rotation {
+                      running: catalogController.suggestionLoading
+                      from: 0; to: 360
+                      duration: 800
+                      loops: Animation.Infinite
+                    }
+                  }
+                }
+                Button {
+                  id: searchButton
+                  iconText: "󰍉"; tooltipText: "Найти"; foreground: root.foreground
+                  onClicked: catalogController.submit()
+                }
+              }
+
+              Row {
+                visible: String(root.catalogDisplay.view || "search") === "search"
+                width: parent.width
+                height: visible ? Style.space(34) : 0
+                spacing: Style.space(4)
+                Repeater {
+                  model: [
+                    { value: "all", label: "Все" }, { value: "track", label: "Треки" },
+                    { value: "artist", label: "Артисты" }, { value: "album", label: "Альбомы" },
+                    { value: "playlist", label: "Плейлисты" }
+                  ]
+                  Button {
+                    required property var modelData
+                    width: (parent.width - Style.space(16)) / 5
+                    height: Style.space(32)
+                    text: modelData.label
+                    foreground: catalogController.filter === modelData.value ? Color.accent : root.dim
+                    bordered: catalogController.filter === modelData.value
+                    onClicked: {
+                      catalogController.filter = modelData.value
+                      if (catalogController.trimmedText() !== "") catalogController.submit()
+                    }
+                  }
+                }
+              }
+
+              Item {
+                visible: String(root.catalogDisplay.view || "search") !== "search"
+                width: parent.width
+                height: visible ? Style.space(34) : 0
+                Button {
+                  anchors.left: parent.left
+                  height: parent.height
+                  text: root.catalogReturnPage === 1 ? "Назад в медиатеку" : "Назад к поиску"
+                  iconText: "󰁍"
+                  foreground: root.foreground
+                  bordered: true
+                  onClicked: catalogController.back()
+                }
+              }
+
+              Item {
+                id: searchResultsViewport
+                width: parent.width
+                height: Math.max(Style.space(240), Style.space(424)
+                  - (root.hasVisibleError ? errorCard.height + Style.space(12) : 0))
+                clip: true
+
+                SkeletonList {
+                  visible: root.searchListLoading
+                  anchors.fill: parent
+                  rowCount: 8
+                  foreground: root.foreground
+                }
+
+                ListView {
+                  id: catalogResultsList
+                  visible: !root.searchListLoading && !catalogController.suggestionsVisible
+                  anchors.fill: parent
+                  clip: true
+                  boundsBehavior: Flickable.StopAtBounds
+                  interactive: contentHeight > height
+                  cacheBuffer: height * 2
+                  model: root.catalogRows
+                  spacing: Style.space(2)
+                  ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                  delegate: BorderSurface {
+                    id: catalogRow
+                    required property var modelData
+                    readonly property string rowKind: String(modelData.kind || "")
+                    readonly property var value: modelData.value || ({})
+                    readonly property bool actionable: ["track", "artist", "album", "playlist",
+                      "loadSearch", "loadEntity", "loadRelease", "retrySearch", "retryEntity"].indexOf(rowKind) >= 0
+                    readonly property bool hovered: catalogHover.hovered
+                    width: catalogResultsList.width
+                      - (catalogResultsList.contentHeight > catalogResultsList.height ? Style.space(8) : 0)
+                    height: rowKind === "entityHeader" ? Style.space(112)
+                      : (rowKind === "description" ? Math.max(Style.space(52), catalogText.implicitHeight + Style.space(18))
+                      : (rowKind === "section" ? Style.space(30)
+                      : (rowKind === "track" || rowKind === "artist" || rowKind === "album" || rowKind === "playlist"
+                        ? Style.space(58) : Style.space(42))))
+                    radius: Style.cornerRadius
+                    color: actionable && catalogRow.hovered
+                      ? Style.hoverFillFor(root.foreground, Color.accent)
+                      : (rowKind === "entityHeader" ? Style.normalFillFor(root.foreground, Color.accent) : "transparent")
+                    borderSpec: rowKind === "entityHeader"
+                      ? Border.controlSpec("normal", root.foreground, Color.accent) : Border.none()
+
+                    HoverHandler { id: catalogHover }
+
+                    Row {
+                      visible: catalogRow.rowKind === "entityHeader"
+                      anchors.fill: parent
+                      anchors.margins: Style.space(10)
+                      spacing: Style.space(10)
+                      CatalogImage {
+                        width: Style.space(88); height: width
+                        requestedSource: String(catalogRow.value.artUrl || "")
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        fillMode: Image.PreserveAspectCrop
+                      }
+                      Column {
+                        width: parent.width - Style.space(98)
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(4)
+                        Text {
+                          textFormat: Text.PlainText
+                          width: parent.width
+                          text: String(catalogRow.value.title || catalogRow.value.name || "Каталог")
+                          color: root.foreground; font.family: root.fontFamily
+                          font.pixelSize: Style.font.subtitle; font.bold: true; elide: Text.ElideRight
+                        }
+                        Row {
+                          width: parent.width; spacing: 0
+                          Repeater {
+                            model: catalogRow.value.artists || []
+                            Text {
+                              textFormat: Text.PlainText
+                              id: entityArtistLink
+                              required property var modelData
+                              required property int index
+                              text: modelData.name + (index < (catalogRow.value.artists || []).length - 1 ? ", " : "")
+                              color: entityArtistMouse.containsMouse ? Color.accent : root.dim
+                              font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+                              MouseArea {
+                                id: entityArtistMouse; anchors.fill: parent; hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openCatalogArtist(entityArtistLink.modelData.id)
+                              }
+                            }
+                          }
+                        }
+                        Text {
+                          textFormat: Text.PlainText
+                          width: parent.width
+                          text: [catalogRow.value.year || catalogRow.value.releaseDate,
+                            catalogRow.value.genre, catalogRow.value.ownerName].filter(function(value) {
+                              return String(value || "") !== ""
+                            }).join(" · ")
+                          color: root.dim; font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption; elide: Text.ElideRight
+                        }
+                      }
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      id: catalogText
+                      visible: ["section", "description", "error", "warning", "empty",
+                        "loadSearch", "loadEntity", "loadRelease", "retrySearch", "retryEntity"].indexOf(catalogRow.rowKind) >= 0
+                      anchors.left: parent.left; anchors.right: parent.right
+                      anchors.margins: Style.space(10); anchors.verticalCenter: parent.verticalCenter
+                      text: catalogRow.rowKind === "section"
+                        ? String(modelData.title || "") + (Number(modelData.count || 0) > 0 ? " · " + modelData.count : "")
+                        : String(modelData.title || "")
+                      wrapMode: catalogRow.rowKind === "description" ? Text.WordWrap : Text.NoWrap
+                      elide: catalogRow.rowKind === "description" ? Text.ElideNone : Text.ElideRight
+                      horizontalAlignment: catalogRow.rowKind.indexOf("load") === 0
+                        || catalogRow.rowKind.indexOf("retry") === 0 ? Text.AlignHCenter : Text.AlignLeft
+                      color: catalogRow.rowKind === "error" ? Color.urgent
+                        : (catalogRow.rowKind.indexOf("load") === 0
+                          || catalogRow.rowKind.indexOf("retry") === 0 ? Color.accent : root.dim)
+                      font.family: root.fontFamily
+                      font.pixelSize: catalogRow.rowKind === "section" ? Style.font.caption : Style.font.bodySmall
+                      font.bold: catalogRow.rowKind === "section"
+                        || catalogRow.rowKind.indexOf("load") === 0
+                        || catalogRow.rowKind.indexOf("retry") === 0
+                      font.letterSpacing: catalogRow.rowKind === "section" ? .8 : 0
+                    }
+
+                    Row {
+                      z: 2
+                      visible: ["track", "artist", "album", "playlist"].indexOf(catalogRow.rowKind) >= 0
+                      anchors.left: parent.left; anchors.right: parent.right
+                      anchors.margins: Style.space(9); anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(9)
+                      CatalogImage {
+                        width: Style.space(40); height: width
+                        requestedSource: String(catalogRow.value.artUrl || "")
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        fillMode: Image.PreserveAspectCrop
+                      }
+                      Column {
+                        width: parent.width - Style.space(49)
+                          - (catalogRow.rowKind === "track" ? Style.space(35) : 0)
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 1
+                        Text {
+                          textFormat: Text.PlainText
+                          width: parent.width
+                          text: String(catalogRow.value.title || catalogRow.value.name || "Без названия")
+                          color: root.foreground; font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight
+                        }
+                        Row {
+                          width: parent.width; spacing: 0
+                          Repeater {
+                            model: catalogRow.value.artists || []
+                            Text {
+                              textFormat: Text.PlainText
+                              id: catalogArtistLink
+                              required property var modelData
+                              required property int index
+                              text: modelData.name + (index < (catalogRow.value.artists || []).length - 1 ? ", " : "")
+                              color: catalogArtistMouse.containsMouse ? Color.accent : root.dim
+                              font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                              MouseArea {
+                                id: catalogArtistMouse; anchors.fill: parent; hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openCatalogArtist(catalogArtistLink.modelData.id)
+                              }
+                            }
+                          }
+                          Text {
+                            textFormat: Text.PlainText
+                            id: catalogAlbumLink
+                            visible: catalogRow.rowKind === "track" && String(catalogRow.value.album || "") !== ""
+                            text: (catalogRow.value.artists || []).length > 0
+                              ? " · " + String(catalogRow.value.album || "") : String(catalogRow.value.album || "")
+                            color: catalogAlbumMouse.containsMouse && String(catalogRow.value.albumId || "") !== ""
+                              ? Color.accent : root.dim
+                            font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                            MouseArea {
+                              id: catalogAlbumMouse; anchors.fill: parent
+                              enabled: String(catalogRow.value.albumId || "") !== ""
+                              hoverEnabled: enabled
+                              cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                              onClicked: root.openCatalogAlbum(catalogRow.value.albumId)
+                            }
+                          }
+                          Text {
+                            textFormat: Text.PlainText
+                            visible: catalogRow.rowKind !== "track"
+                              && (catalogRow.value.artists || []).length === 0
+                            text: String(catalogRow.value.artist || catalogRow.value.ownerName
+                              || (catalogRow.value.genres || []).join(", ") || "")
+                            color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption
+                          }
+                        }
+                      }
+                      Button {
+                        visible: catalogRow.rowKind === "track" && catalogRow.hovered
+                        width: catalogRow.rowKind === "track" ? Style.space(26) : 0
+                        height: Style.space(26)
+                        anchors.verticalCenter: parent.verticalCenter
+                        horizontalPadding: 0; verticalPadding: 0
+                        iconText: "󰐒"; iconSize: Style.font.icon
+                        tooltipText: "Добавить в плейлист"
+                        foreground: root.dim
+                        onClicked: root.openCollectionTrack(
+                          String(modelData.source || "search") === "entity"
+                            ? "catalogEntity" : "catalogSearch",
+                          Number(catalogRow.value.index || 0), catalogRow.value,
+                          false, "", "")
+                      }
+                    }
+
+                    MouseArea {
+                      id: catalogMouse
+                      anchors.fill: parent
+                      anchors.rightMargin: catalogRow.rowKind === "track" ? Style.space(36) : 0
+                      enabled: catalogRow.actionable
+                      hoverEnabled: enabled
+                      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                      onClicked: {
+                        if (catalogRow.rowKind === "track")
+                          catalogController.trackPlaybackRequested(String(modelData.source || "search"), Number(catalogRow.value.index || 0))
+                        else if (catalogRow.rowKind === "artist") root.openCatalogArtist(catalogRow.value.id)
+                        else if (catalogRow.rowKind === "album") root.openCatalogAlbum(catalogRow.value.id)
+                        else if (catalogRow.rowKind === "playlist") root.openCatalogPlaylist(catalogRow.value)
+                        else if (catalogRow.rowKind === "loadSearch") catalogController.loadMoreRequested()
+                        else if (catalogRow.rowKind === "loadEntity") root.action("catalog_entity_more")
+                        else if (catalogRow.rowKind === "loadRelease")
+                          catalogController.releaseMoreRequested(String(modelData.section || ""))
+                        else if (catalogRow.rowKind === "retrySearch") catalogController.submit()
+                        else if (catalogRow.rowKind === "retryEntity") {
+                          var entity = root.catalogDisplay.entity || {}
+                          if (entity.type === "artist") root.action("catalog_artist", entity.id)
+                          else if (entity.type === "album") root.action("catalog_album", entity.id)
+                          else if (entity.type === "playlist")
+                            root.action("catalog_playlist", [entity.uuid, entity.owner, entity.kind])
+                        }
+                      }
+                    }
+                  }
+                }
+
+                BorderSurface {
+                  z: 20
+                  visible: String(root.catalogDisplay.view || "search") === "search"
+                    && catalogController.suggestionsVisible
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                  height: visible ? Math.min(Style.space(152), suggestionList.contentHeight + Style.space(4)) : 0
+                  radius: Style.cornerRadius
+                  color: Style.normalFillFor(root.foreground, Color.accent)
+                  borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+                  ListView {
+                    id: suggestionList
+                    anchors.fill: parent; anchors.margins: Style.space(2)
+                    clip: true; model: catalogController.suggestions
+                    delegate: Item {
+                      required property var modelData
+                      required property int index
+                      width: suggestionList.width; height: Style.space(36)
+                      Rectangle {
+                        anchors.fill: parent
+                        color: index === catalogController.highlightedSuggestionIndex
+                          ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+                      }
+                      Text {
+                        textFormat: Text.PlainText
+                        anchors.left: parent.left; anchors.right: parent.right
+                        anchors.margins: Style.space(9); anchors.verticalCenter: parent.verticalCenter
+                        text: String(modelData); elide: Text.ElideRight
+                        color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+                      }
+                      MouseArea {
+                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onEntered: catalogController.highlightedSuggestionIndex = index
+                        onClicked: {
+                          searchField.text = String(modelData)
+                          catalogController.selectSuggestion(modelData)
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              Item { width: 1; height: Style.space(8) }
+            }
+
+            Column {
+              visible: root.settingsOpen
+              width: parent.width
+              spacing: Style.space(10)
+
+              Item {
+                width: parent.width
+                height: Style.space(30)
+
+                Button {
+                  id: settingsBackButton
+                  anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(30); height: Style.space(28)
+                  horizontalPadding: 0; verticalPadding: 0
+                  iconText: "󰁍"; iconSize: Style.font.icon
+                  tooltipText: "Вернуться"
+                  foreground: root.foreground
+                  onClicked: root.closeSettings()
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.left: settingsBackButton.right
+                  anchors.leftMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "НАСТРОЙКИ"
+                  color: root.foreground; font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: 1
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  visible: String(root.data.version || "") !== ""
+                  anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                  text: "v" + String(root.data.version || "")
+                  color: root.dim; font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                text: "ВОСПРОИЗВЕДЕНИЕ"
+                color: root.dim; font.family: root.fontFamily
+                font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: .7
+              }
+
+              Toggle {
+                width: parent.width
+                label: "Продолжать после перезапуска"
+                description: "Возобновлять игравший трек после запуска сервиса"
+                checked: Boolean(root.preference("autoResume", true))
+                foreground: root.foreground
+                onClicked: root.setPreference("autoResume", !checked)
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                text: "ВОССТАНОВЛЕНИЕ СЕССИИ"
+                color: root.dim; font.family: root.fontFamily
+                font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: .7
+              }
+              Toggle {
+                width: parent.width; label: "Восстанавливать очередь"
+                checked: Boolean(root.preference("restoreQueue", true)); foreground: root.foreground
+                onClicked: root.setPreference("restoreQueue", !checked)
+              }
+              Toggle {
+                width: parent.width; label: "Восстанавливать позицию трека"
+                checked: Boolean(root.preference("restorePosition", true)); foreground: root.foreground
+                onClicked: root.setPreference("restorePosition", !checked)
+              }
+              Toggle {
+                width: parent.width; label: "Восстанавливать громкость"
+                checked: Boolean(root.preference("restoreVolume", true)); foreground: root.foreground
+                onClicked: root.setPreference("restoreVolume", !checked)
+              }
+
+              Dropdown {
+                width: parent.width
+                label: "Качество аудио"
+                value: String(root.preference("audioQuality", "best"))
+                foreground: root.foreground; fontFamily: root.fontFamily
+                options: [
+                  { value: "best", label: "Лучшее доступное" },
+                  { value: "economy", label: "Экономия трафика" }
+                ]
+                onChanged: function(nextValue) { root.setPreference("audioQuality", nextValue) }
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                text: "ВЕРХНИЙ БАР"
+                color: root.dim; font.family: root.fontFamily
+                font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: .7
+              }
+
+              Toggle {
+                width: parent.width; label: "Показывать кнопки управления"
+                checked: Boolean(root.preference("showControls", true)); foreground: root.foreground
+                onClicked: root.setPreference("showControls", !checked)
+              }
+              Toggle {
+                width: parent.width; label: "Показывать исполнителя"
+                checked: Boolean(root.preference("showArtist", true)); foreground: root.foreground
+                onClicked: root.setPreference("showArtist", !checked)
+              }
+              Toggle {
+                width: parent.width; label: "Показывать название трека"
+                checked: Boolean(root.preference("showTitle", true)); foreground: root.foreground
+                onClicked: root.setPreference("showTitle", !checked)
+              }
+
+              Toggle {
+                width: parent.width
+                label: "Показывать обложку"
+                checked: Boolean(root.preference("showCover", true))
+                foreground: root.foreground
+                onClicked: root.setPreference("showCover", !checked)
+              }
+
+              Dropdown {
+                width: parent.width
+                label: "Форма обложки"
+                value: String(root.preference("coverShape", "rounded"))
+                foreground: root.foreground; fontFamily: root.fontFamily
+                options: [
+                  { value: "square", label: "Квадратная" },
+                  { value: "rounded", label: "Скруглённая" },
+                  { value: "circle", label: "Круглая" }
+                ]
+                onChanged: function(value) { root.setPreference("coverShape", value) }
+              }
+
+              Toggle {
+                width: parent.width
+                label: "Показывать линию прогресса"
+                checked: Boolean(root.preference("showProgress", true))
+                foreground: root.foreground
+                onClicked: root.setPreference("showProgress", !checked)
+              }
+
+              Dropdown {
+                width: parent.width
+                label: "Длинные названия"
+                value: String(root.preference("longTitleMode", "truncate"))
+                foreground: root.foreground; fontFamily: root.fontFamily
+                options: [
+                  { value: "truncate", label: "Обрезать многоточием" },
+                  { value: "scroll", label: "Плавно прокручивать" }
+                ]
+                onChanged: function(value) { root.setPreference("longTitleMode", value) }
+              }
+
+              Dropdown {
+                width: parent.width
+                label: "Ширина информации о треке"
+                value: String(root.preference("barWidth", "normal"))
+                foreground: root.foreground; fontFamily: root.fontFamily
+                options: [
+                  { value: "compact", label: "Компактная" },
+                  { value: "normal", label: "Обычная" },
+                  { value: "wide", label: "Широкая" }
+                ]
+                onChanged: function(nextValue) { root.setPreference("barWidth", nextValue) }
+              }
+
+              Dropdown {
+                width: parent.width
+                label: "Уведомления при смене трека"
+                value: String(root.preference("notifications", "off"))
+                foreground: root.foreground; fontFamily: root.fontFamily
+                options: [
+                  { value: "off", label: "Выключены" },
+                  { value: "all", label: "Показывать всегда" }
+                ]
+                onChanged: function(value) { root.setPreference("notifications", value) }
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                text: "АККАУНТ"
+                color: root.dim; font.family: root.fontFamily
+                font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: .7
+              }
+
+              BorderSurface {
+                width: parent.width
+                height: accountContent.implicitHeight + Style.space(20)
+                radius: Style.cornerRadius
+                color: Style.normalFillFor(root.foreground, Color.accent)
+                borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+
+                Column {
+                  id: accountContent
+                  anchors.left: parent.left; anchors.right: parent.right
+                  anchors.margins: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(8)
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    text: "Яндекс Музыка подключена"
+                    color: root.foreground; font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall; font.bold: true
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    visible: root.confirmLogout
+                    width: parent.width; wrapMode: Text.WordWrap
+                    text: "Токен авторизации будет удалён. Для повторного входа понадобится браузер."
+                    color: Color.urgent; font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Row {
+                    width: parent.width
+                    spacing: Style.space(8)
+                    Button {
+                      width: root.confirmLogout
+                        ? parent.width - cancelLogoutButton.width - parent.spacing : parent.width
+                      text: root.confirmLogout ? "Подтвердить выход" : "Выйти из аккаунта"
+                      foreground: Color.urgent; bordered: true
+                      onClicked: {
+                        if (root.confirmLogout) {
+                          root.action("logout")
+                          root.closeSettings()
+                        } else root.confirmLogout = true
+                      }
+                    }
+                    Button {
+                      id: cancelLogoutButton
+                      visible: root.confirmLogout
+                      text: "Отмена"; foreground: root.foreground; bordered: true
+                      onClicked: root.confirmLogout = false
+                    }
+                  }
+                }
+              }
             }
           }
         }

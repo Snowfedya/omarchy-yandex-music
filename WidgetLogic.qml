@@ -27,9 +27,18 @@ Item {
     target.hostWidget = root.hostWidget
     target.session = session
   }
-  function open() { if (panelLoader.item) panelLoader.item.open() }
-  function close() { if (panelLoader.item) panelLoader.item.close() }
-  function toggle() { if (panelLoader.item) panelLoader.item.toggle() }
+  function open() {
+    console.log("[YandexMusic] WidgetLogic.open called, panelLoader.item:", panelLoader.item)
+    if (panelLoader.item) panelLoader.item.open()
+  }
+  function close() {
+    console.log("[YandexMusic] WidgetLogic.close called")
+    if (panelLoader.item) panelLoader.item.close()
+  }
+  function toggle() {
+    console.log("[YandexMusic] WidgetLogic.toggle called, panelLoader.item:", panelLoader.item)
+    if (panelLoader.item) panelLoader.item.toggle()
+  }
   function closeForPopoutSwitch() { if (panelLoader.item) panelLoader.item.closeForPopoutSwitch() }
   function showArtist(artistId) {
     if (!artistId) return
@@ -58,7 +67,9 @@ Item {
     active: true
     visible: false
     source: Qt.resolvedUrl("Panel.qml")
+    onStatusChanged: console.log("[YandexMusic] panelLoader status:", status, "item:", item)
     onLoaded: {
+      console.log("[YandexMusic] panelLoader loaded successfully! item:", item)
       root.injectPanel()
       Qt.callLater(root.injectPanel)
     }

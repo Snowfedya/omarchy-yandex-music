@@ -13,20 +13,43 @@ BarWidget {
   readonly property bool popoutSwitchClosing: logic ? logic.popoutSwitchClosing : false
   // Suppress Omarchy's extra underline while this widget's popup is open.
   readonly property real openPanelIndicatorWidth: 0.01
+  readonly property real openPanelIndicatorHeight: 0.01
+
+  property bool interactive: true
+  property bool pressable: true
+  property bool concealed: false
+
+  function triggerPress(button) {
+    if (button === Qt.MiddleButton) {
+      if (logic) logic.action("pause")
+    } else {
+      if (logic) logic.toggle()
+    }
+  }
 
   function injectLogic() {
     if (!logic) return
     logic.bar = root.bar
     logic.settings = root.settings
-    logic.anchorItem = playerLoader.item && playerLoader.item.coverItem ? playerLoader.item.coverItem : playerLoader.item
+    logic.anchorItem = root
     logic.hostWidget = root
   }
-  function open() { if (logic) logic.open() }
-  function close() { if (logic) logic.close() }
+  function open() {
+    console.log("[YandexMusic] BarWidget.open called, logic:", logic)
+    if (logic) logic.open()
+  }
+  function close() {
+    console.log("[YandexMusic] BarWidget.close called")
+    if (logic) logic.close()
+  }
+  function toggle() {
+    console.log("[YandexMusic] BarWidget.toggle called, logic:", logic)
+    if (logic) logic.toggle()
+  }
   function closeForPopoutSwitch() { if (logic) logic.closeForPopoutSwitch() }
 
-  implicitWidth: playerLoader.item ? playerLoader.item.implicitWidth : 0
-  implicitHeight: playerLoader.item ? playerLoader.item.implicitHeight : barSize
+  implicitWidth: root.vertical ? root.barSize : (playerLoader.item ? playerLoader.item.implicitWidth : 0)
+  implicitHeight: root.vertical ? root.barSize : (playerLoader.item ? playerLoader.item.implicitHeight : barSize)
   onBarChanged: injectLogic()
   onSettingsChanged: injectLogic()
 
